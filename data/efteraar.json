@@ -1,0 +1,73 @@
+{
+  "semester": "efteraar",
+  "sourceName": "data/efteraar.json",
+  "lastSyncedAt": null,
+  "rules": null,
+  "teachers": [],
+  "shifts": [],
+  "activities": [
+    {
+      "type": "school_trip",
+      "title": "Rejseuge (Uge 37-38)",
+      "start": "2026-09-11",
+      "end": "2026-09-18",
+      "bufferDays": 7,
+      "calendarLocked": false,
+      "teachers": [
+        "MB", "TH",
+        "SB", "MH", "KL"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    },
+    {
+      "type": "school_trip",
+      "title": "Overnatningstur (Uge 40)",
+      "start": "2026-10-07",
+      "end": "2026-10-08",
+      "bufferDays": 7,
+      "calendarLocked": false,
+      "teachers": ["TH"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    },
+    {
+      "type": "event_host",
+      "title": "Arrangementsværtsskab (Uge 43)",
+      "start": "2026-10-23",
+      "end": "2026-10-24",
+      "bufferDays": 4,
+      "calendarLocked": false,
+      "teachers": ["ML"],
+      "credits": {
+        "tripWeekendHosts": 0,
+        "tripDayHosts": 0,
+        "eventHosts": 1,
+        "hours": 7
+      }
+    },
+    {
+      "type": "school_trip",
+      "title": "La Santa (Uge 45-46)",
+      "start": "2026-11-06",
+      "end": "2026-11-13",
+      "bufferDays": 7,
+      "noSchoolHosts": true,
+      "calendarLocked": false,
+      "teachers": ["MM", "MB", "ML", "JD", "JH", "JN", "NM", "AB"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    }
+  ]
+}

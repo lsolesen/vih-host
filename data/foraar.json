@@ -1,0 +1,60 @@
+{
+  "semester": "foraar",
+  "sourceName": "data/foraar.json",
+  "lastSyncedAt": null,
+  "rules": null,
+  "teachers": [],
+  "shifts": [],
+  "activities": [
+    {
+      "type": "school_trip",
+      "title": "Rejseuge (Uge 8-9)",
+      "start": "2027-02-26",
+      "end": "2027-03-05",
+      "bufferDays": 7,
+      "noSchoolHosts": true,
+      "calendarLocked": false,
+      "teachers": [
+        "AB", "JH", "JD", "KL", "MB",
+        "JH", "MM", "ML", "TH", "MH"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    },
+    {
+      "type": "school_trip",
+      "title": "Østrig (Uge 23)",
+      "start": "2027-06-06",
+      "end": "2027-06-11",
+      "bufferDays": 7,
+      "noSchoolHosts": true,
+      "calendarLocked": false,
+      "teachers": ["JK", "TH", "TG", "MH", "DJ", "SB", "MV"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    },
+    {
+      "type": "school_trip",
+      "title": "Folkemøde (Uge 24)",
+      "start": "2027-06-16",
+      "end": "2027-06-19",
+      "bufferDays": 7,
+      "noSchoolHosts": true,
+      "calendarLocked": false,
+      "teachers": ["AB", "ID", "JD", "KL", "MO"],
+      "credits": {
+        "tripWeekendHosts": 1,
+        "tripDayHosts": 1,
+        "eventHosts": 0,
+        "hours": 19
+      }
+    }
+  ]
+}
