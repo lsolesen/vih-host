@@ -3,125 +3,355 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Arbejdstid & Funktionsplan</title>
+    <title>Værtsplanlægger – Efterskole</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-    <!-- LÅST FORSIDE -->
-    <div id="lock-screen" class="lock-screen hidden">
-        <div class="lock-box">
-            <h2>🔒 Personligt arbejdstidsoverblik</h2>
-            <p>Denne side kræver et personligt link fra ledelsen.</p>
-            <div class="admin-unlock">
-                <input type="password" id="admin-code-input" placeholder="Leder-kode..." />
-                <button id="admin-login-btn">Lås op</button>
+    <div class="container">
+        <header class="topbar">
+            <div class="topbar-left">
+                <h1>Værtsplanlægger</h1>
+                <select id="semester-select" class="semester-select" onchange="switchSemester(this.value)" title="Vælg semester">
+                    <option value="efteraar">🍂 Efterår (E2026)</option>
+                    <option value="foraar">🌱 Forår (F2027)</option>
+                </select>
+                <span id="data-source-badge" class="source-badge">Indlæser...</span>
             </div>
-            <p id="lock-error" class="error-text hidden">Ugyldigt link eller forkert kode.</p>
-        </div>
-    </div>
-
-    <!-- LEDER-MENU -->
-    <div id="leader-bar" class="no-print leader-menu hidden">
-        <div class="leader-left">
-            <strong>🔑 Leder-visning:</strong>
-            <select id="teacher-select"></select>
-            <button id="copy-link-btn" class="btn-primary">🔗 Kopier hemmeligt lærer-link</button>
-            <button id="copy-all-btn" class="btn-secondary">📋 Kopier alle links</button>
-        </div>
-    </div>
-
-    <!-- HOVEDINDHOLD (One-Pager) -->
-    <div id="main-app" class="container hidden">
-        <header>
-            <div>
-                <h1>Arbejdstid & Opgaver: <span id="t-navn">Henter data...</span></h1>
-                <div class="season-text">Skoleåret 2026 / 2027 (E26 & F27)</div>
-            </div>
-            <div class="header-badges" style="align-items: center;">
-                <span class="badge">Ansættelsesgrad: <strong id="t-grad">--</strong></span>
-                <span class="badge badge-outline">Undervisningsuger: <strong id="t-uger-stat">--</strong></span>
-                <button id="refresh-data-btn" class="btn-secondary no-print" type="button" title="Genindlæs nyeste tal fra Google Sheets">🔄 Opdater data</button>
-                <button onclick="window.print()" class="btn-secondary no-print" type="button">🖨️ Print / PDF</button>
+            <div class="actions">
+                <button class="btn btn-primary" onclick="syncFromGoogleSheet()" title="Hent de nyeste ønsker og normer fra Google Sheets (bevarer låste vagter 🔒)">🔄 Opdater fra regneark</button>
+                <label class="btn btn-secondary file-upload" title="Indlæs en lokal CSV-fil fra regnearket">
+                    📄 Importer CSV
+                    <input type="file" id="csv-file" accept=".csv" onchange="handleCsvUpload(event)">
+                </label>
+                <button class="btn btn-secondary" onclick="exportJson()" title="Gem hele planen som JSON-fil">💾 Eksporter JSON</button>
+                <label class="btn btn-secondary file-upload" title="Indlæs en tidligere gemt JSON-fil">
+                    📂 Importer JSON
+                    <input type="file" id="json-file" accept=".json" onchange="handleJsonUpload(event)">
+                </label>
+                <button class="btn btn-danger" onclick="resetStorage()" title="Nulstil lokal arbejdskopi">Nulstil</button>
             </div>
         </header>
 
-        <!-- UGEFORDELING (Konsolideret optælling + farvekoder i toppen) -->
-        <section class="timeline-section">
-            <div class="section-title-row">
-                <div class="title-with-toggle">
-                    <h2>Ugefordeling E2026 / F2027</h2>
-                    <button id="toggle-weeks-btn" class="btn-toggle no-print" type="button">Vis ugeplan ▾</button>
+        <nav class="tabs">
+            <button class="tab active" data-tab="schedule" onclick="switchTab('schedule')">📅 Vagtplan</button>
+            <button class="tab" data-tab="calendar" onclick="switchTab('calendar')">🗓️ Kalenderoverblik</button>
+            <button class="tab" data-tab="teachers" onclick="switchTab('teachers')">👥 Læreroverblik & Fordeling</button>
+            <button class="tab" data-tab="activities" onclick="switchTab('activities')">🧳 Skolerejser & Arrangementer <span id="activity-count-badge" class="pill-count">0</span></button>
+            <button class="tab" data-tab="analysis" onclick="switchTab('analysis')">🔍 Analyse <span id="analysis-issue-badge" class="pill-count">0</span></button>
+            <button class="tab" data-tab="config" onclick="switchTab('config')">⚙️ Regler & Eksport</button>
+        </nav>
+
+        <!-- FANE 1: VAGTPLAN -->
+        <section id="tab-schedule" class="tab-content active">
+            <div class="kpi-grid" id="schedule-kpis"></div>
+
+            <div class="toolbar">
+                <div class="toolbar-left">
+                    <select id="filter-month" onchange="renderAll()">
+                        <option value="all">Alle måneder</option>
+                    </select>
+                    <select id="filter-status" onchange="renderAll()">
+                        <option value="all">Vis alle dage</option>
+                        <option value="unassigned">Mangler værter</option>
+                        <option value="unlocked">Har ulåste værter</option>
+                        <option value="locked">Har låste værter (🔒)</option>
+                        <option value="weekend">Weekender & arrangementer</option>
+                        <option value="warnings">Kun dage med advarsler</option>
+                    </select>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="toggle-wishes" checked onchange="renderAll()">
+                        Vis ønsker (o / x)
+                    </label>
                 </div>
-                <div id="week-summary-pills" class="week-summary-pills"></div>
+                <div class="toolbar-right">
+                    <button class="btn btn-primary" onclick="generateOptimalDraft()" title="Udfylder alle ulåste vagter bedst muligt ud fra kvote, ønsker og spredning">✨ Generer optimalt udkast</button>
+                    <button class="btn btn-secondary" onclick="clearUnlockedDrafts()" title="Fjerner alle ulåste vagter men beholder låste 🔒">🧹 Ryd ulåste</button>
+                    <button class="btn btn-secondary" onclick="lockAllAssigned()" title="Låser alle aktuelt tildelte værter fast">🔒 Lås alle tildelte</button>
+                </div>
             </div>
 
-            <div id="weeks-collapsible-body" class="weeks-body collapsed">
-                <div class="semester-block">
-                    <div class="semester-label">Efterår 2026 (Uge 32–52)</div>
-                    <div class="timeline" id="timeline-efteraar"></div>
+            <div class="table-wrapper">
+                <table id="schedule-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 65px;">Uge</th>
+                            <th style="width: 110px;">Dato</th>
+                            <th style="width: 210px;">Vagttype & Info</th>
+                            <th style="width: 135px;">Status (Fra ark)</th>
+                            <th>Tildelte værter & Forslag (klik 🔒 for at låse fast)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="schedule-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- FANE 1B: KOMPAKT KALENDEROVERBLIK (1 SIDE) -->
+        <section id="tab-calendar" class="tab-content">
+            <div class="toolbar no-print">
+                <div class="toolbar-left">
+                    <strong id="cal-overview-title" style="font-size:15px;">Kalenderoverblik</strong>
+                    <select id="cal-highlight-teacher" onchange="renderAll()" title="Fremhæv én lærers vagter i hele perioden">
+                        <option value="all">👤 Fremhæv lærer: Vis alle</option>
+                    </select>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="cal-show-details" checked onchange="renderAll()">
+                        Vis rejser, begivenheder & ferier
+                    </label>
                 </div>
-
-                <div class="semester-block">
-                    <div class="semester-label">Forår 2027 (Uge 1–26)</div>
-                    <div class="timeline" id="timeline-foraar"></div>
+                <div class="toolbar-right">
+                    <span style="font-size:12px; color:var(--muted);">💡 Klik på en dato for at redigere i Vagtplan</span>
+                    <button class="btn btn-secondary" onclick="window.print()">🖨️ Print / PDF</button>
                 </div>
+            </div>
 
-                <div class="semester-block">
-                    <div class="semester-label">Sommer 2027 (Uge 27–31)</div>
-                    <div class="timeline timeline-sommer" id="timeline-sommer"></div>
+            <div id="calendar-overview-grid" class="cal-halfyear-grid"></div>
+        </section>
+
+        <!-- FANE 2: LÆREROVERBLIK & ÅRSOVERSIGT -->
+        <section id="tab-teachers" class="tab-content">
+            <div class="toolbar" style="margin-bottom: 12px;">
+                <div class="view-switch-bar">
+                    <button type="button" class="view-switch-btn active" id="btn-teacher-mode-semester" onclick="setTeacherOverviewMode('semester')">
+                        📅 Aktivt semester
+                    </button>
+                    <button type="button" class="view-switch-btn" id="btn-teacher-mode-year" onclick="setTeacherOverviewMode('year')">
+                        📊 Hele året (Efterår + Forår & Puljer)
+                    </button>
                 </div>
+                <div id="teacher-overview-actions" style="display:none; align-items:center; gap:10px;">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="toggle-year-deviations" onchange="renderAll()">
+                        Vis kun lærere uden for grøn buffer
+                    </label>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="refreshAllSemestersForYear()">🔄 Genindlæs begge semestre</button>
+                </div>
+            </div>
 
-                <div class="click-hint-row">Klik på en uge for at se indhold og kolleger</div>
-                <div id="week-detail-banner" class="week-detail-banner hidden"></div>
+            <!-- VISNING A: AKTIVT SEMESTER -->
+            <div id="teachers-semester-view">
+                <div class="legend-bar">
+                    <span><strong>Forklaring:</strong></span>
+                    <span><i class="dot dot-day"></i> Dagsvært</span>
+                    <span><i class="dot dot-wknd"></i> Weekend</span>
+                    <span><i class="dot dot-special"></i> Skolerejse / Arrangement</span>
+                    <span style="color:var(--muted)">| Tallene viser: Optalt / Norm fra regneark</span>
+                </div>
+                <div class="table-wrapper">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width: 75px;">Lærer</th>
+                                <th style="width: 75px;">Ansæt.</th>
+                                <th style="width: 105px;">Dagsvagter<br><small>(Optalt / Norm)</small></th>
+                                <th style="width: 115px;">Weekend<br><small>(Optalt / Norm)</small></th>
+                                <th style="width: 105px;">Fredage<br><small>(Optalt / Mål)</small></th>
+                                <th style="width: 135px;">Rejse & Arr.<br><small>(Tilknyttet)</small></th>
+                                <th style="width: 115px;">I alt<br><small>(Optalt / Norm)</small></th>
+                                <th style="min-width: 250px;">Status & Spredning i perioden</th>
+                            </tr>
+                        </thead>
+                        <tbody id="teacher-body"></tbody>
+                    </table>
+                </div>
+            </div>
 
-                <div class="shared-weeks-box">
-                    <h3>Særlige uger & hvem du er afsted / hjemme med</h3>
-                    <div id="shared-weeks-container" class="shared-weeks-grid"></div>
+            <!-- VISNING B: SAMLET ÅRSOVERSIGT (EFTERÅR + FORÅR) -->
+            <div id="teachers-year-view" style="display:none;">
+                <div class="kpi-grid" id="year-overview-kpis"></div>
+                <div class="rate-info-bar" id="year-rate-info"></div>
+                <div class="table-wrapper">
+                    <table class="year-overview-table">
+                        <thead id="year-overview-head"></thead>
+                        <tbody id="year-overview-body"></tbody>
+                        <tfoot id="year-overview-foot"></tfoot>
+                    </table>
                 </div>
             </div>
         </section>
 
-        <!-- 2-KOLONNE HOVEDDEL -->
-        <div class="grid-2col">
-            <!-- VENSTRE KOLONNE -->
-            <div class="col-left">
-                <h2>Arbejdstidsregnskab (nedtælling)</h2>
-                <div id="countdown-ledger" class="ledger-card"></div>
+        <!-- FANE 3: SKOLEREJSER & ARRANGEMENTER -->
+        <section id="tab-activities" class="tab-content">
+            <div class="card">
+                <h2>Opret eller rediger skolerejse / arrangement</h2>
+                <p class="hint">Deltagere på en skolerejse får som udgangspunkt <strong>1 weekendværtsskab + 1 hverdagsværtsskab</strong> og foreslås ikke uden om rejsen i hvile-bufferen.</p>
 
-                <h2 style="margin-top: 22px;">Opgaver, Rejser & Temauger</h2>
-                <p class="section-subtext">
-                    Viser <strong>opgavetimerne</strong>, der trækkes fra puljen (klik på en opgave for at se den samlede tid).
-                </p>
-                <div id="opgaver-container"></div>
+                <div id="editing-activity-banner" class="edit-banner" style="display:none;">
+                    <span>✏️ <strong>Du redigerer en eksisterende skolerejse / begivenhed</strong></span>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="cancelEditActivity()">Annuller redigering</button>
+                </div>
+
+                <div class="activity-form">
+                    <div class="form-row">
+                        <div class="form-field">
+                            <label>Type</label>
+                            <select id="act-type" onchange="onActivityTypeChange()">
+                                <option value="school_trip">🧳 Skolerejse / Overnatning</option>
+                                <option value="event_host">🎪 Arrangementsværtsskab</option>
+                                <option value="absence">🚫 Andet fravær (0 værtsskaber)</option>
+                            </select>
+                        </div>
+                        <div class="form-field" style="flex: 1; min-width: 200px;">
+                            <label>Titel / Beskrivelse</label>
+                            <input type="text" id="act-title" placeholder="Fx Studietur Berlin, Introtur, Gallafest...">
+                        </div>
+                        <div class="form-field">
+                            <label>Startdato</label>
+                            <input type="date" id="act-start">
+                        </div>
+                        <div class="form-field">
+                            <label>Slutdato (hjemkomstdag)</label>
+                            <input type="date" id="act-end">
+                        </div>
+                        <div class="form-field">
+                            <label>Hvile-buffer (dage før/efter)</label>
+                            <input type="number" id="act-buffer" min="0" max="21" value="7">
+                        </div>
+                        <div class="form-field" id="act-no-school-container" style="justify-content:flex-end; padding-bottom:6px;">
+                            <label class="checkbox-label" title="Slår almindelige skoleværter fra i kalenderen frem til hjemkomstdagen">
+                                <input type="checkbox" id="act-no-school">
+                                Ingen skoleværter under rejsen
+                            </label>
+                        </div>
+                    </div>
+
+                    <label style="font-size:12px; font-weight:600; display:block; margin-bottom:6px;">1. Vælg deltagende / ansvarlige lærere:</label>
+                    <div id="act-teacher-pills" class="teacher-pill-selector"></div>
+
+                    <div id="act-credits-container" style="display:none; margin-top:14px;">
+                        <label style="font-size:12px; font-weight:600; display:block; margin-bottom:6px;">2. Tilpas værtsskaber pr. lærer (kan redigeres individuelt):</label>
+                        <div class="table-wrapper" style="box-shadow:none; border:1px solid var(--border);">
+                            <table style="font-size:13px;">
+                                <thead>
+                                    <tr>
+                                        <th>Lærer</th>
+                                        <th id="col-hdr-trip-wknd">Rejse-weekendvært (á 12 t)</th>
+                                        <th id="col-hdr-trip-day">Rejse-hverdagsvært (á 7 t)</th>
+                                        <th id="col-hdr-event" style="display:none;">Arrangementsvært (á 7 t)</th>
+                                        <th>Samlet godskrivning</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="act-credits-body"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div style="margin-top: 14px; display:flex; gap:8px;">
+                        <button class="btn btn-primary" id="btn-save-activity" onclick="saveActivity()">➕ Gem skolerejse / arrangement</button>
+                    </div>
+                </div>
             </div>
 
-            <!-- HØJRE KOLONNE -->
-            <div class="col-right">
-                <div class="fp-header-row">
-                    <h2>Funktionsplan (Ansvarsområder)</h2>
-                    <span class="fp-pill" id="fp-total-pill">-- pt</span>
+            <div class="card">
+                <h2>Registrerede skolerejser & arrangementsværtsskaber</h2>
+                <div class="table-wrapper" style="box-shadow:none; border:1px solid var(--border);">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Type</th>
+                                <th>Titel & Kalenderlås</th>
+                                <th>Periode</th>
+                                <th>Buffer</th>
+                                <th>Lærere & tilknyttede værtsskaber</th>
+                                <th>Handling</th>
+                            </tr>
+                        </thead>
+                        <tbody id="activity-list-body"></tbody>
+                    </table>
                 </div>
-                <div id="funktioner-container"></div>
-
-                <!-- FRI & FERIEØNSKER -->
-                <div class="fp-header-row" style="margin-top: 26px;">
-                    <h2>Fri- & Ferieønsker</h2>
-                    <span class="fp-pill" id="ff-count-pill">Feriefridage: -- / 5</span>
-                </div>
-                <div class="ferie-rules-box">
-                    <div><strong>Ferie (5 uger):</strong> 4 uger i sommerferien (ift. sommerkursus) + 1 uge i juleferien – afholdes som hele uger.</div>
-                    <div><strong>Feriefridage (5 dage):</strong> Ønskes frit i semestret (tilstræb hele uger).</div>
-                    <div class="ferie-rules-note">Som udgangspunkt afholdes ferie og feriefridage ikke i opstarts- og afslutningsuger.</div>
-                </div>
-                <div id="ferie-container"></div>
             </div>
-        </div>
+        </section>
+
+        <!-- FANE 4: ANALYSE & KVALITETSTJEK -->
+        <section id="tab-analysis" class="tab-content">
+            <div class="kpi-grid" id="analysis-kpis"></div>
+
+            <!-- Pulje af lærere under norm -->
+            <div class="card" style="margin-bottom: 16px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+                    <h2 style="font-size: 16px; margin:0;">🙋 Pulje: Lærere under norm (indgår først til at løse udfordringer)</h2>
+                    <span id="analysis-friday-info" style="font-size: 12px; color: var(--muted);"></span>
+                </div>
+                <div id="analysis-under-norm"></div>
+            </div>
+
+            <!-- Fund & konkrete forslag med checkbox -->
+            <div class="card" style="margin-bottom: 16px;">
+                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:10px;">
+                    <h2 style="font-size: 16px; margin:0;">🔍 Fund & konkrete løsningsforslag</h2>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="toggle-show-acked" checked onchange="renderAll()">
+                        Vis afvingede ("Set") fund
+                    </label>
+                </div>
+                <div id="analysis-findings"></div>
+            </div>
+
+            <div class="table-wrapper">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Lærer</th>
+                            <th>Norm-afvigelse</th>
+                            <th>Fredage<br><small>(Optalt / Mål)</small></th>
+                            <th>Korteste pause<br><small>(Mellem vagter)</small></th>
+                            <th>Gns. afstand</th>
+                            <th>Weekend-profil<br><small>('a' mod øvrige wknd)</small></th>
+                            <th>Ønsker ('o')<br><small>(Opfyldt)</small></th>
+                            <th>Rejse- & regeltjek</th>
+                        </tr>
+                    </thead>
+                    <tbody id="analysis-teacher-body"></tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- FANE 5: REGLER & EKSPORT -->
+        <section id="tab-config" class="tab-content">
+            <div class="grid-2">
+                <div class="card">
+                    <h2>Timetakster & regler for <span id="config-sem-label"></span></h2>
+                    <p class="hint">Standardværdier indlæses fra <code>settings.js</code> og regnearket. Her kan du justere takster og hvile-regler for det aktive semester.</p>
+                    <div class="form-grid">
+                        <div class="form-field"><label>Dagvært (timer)</label><input type="number" id="rule-weekday-hrs" step="0.5"></div>
+                        <div class="form-field"><label>Weekendvært (timer)</label><input type="number" id="rule-weekend-hrs" step="0.5"></div>
+                        <div class="form-field"><label>Rejse-weekendvært (timer)</label><input type="number" id="rule-trip-hrs" step="0.5"></div>
+                        <div class="form-field"><label>Arrangementsvært (timer)</label><input type="number" id="rule-event-hrs" step="0.5"></div>
+                        <div class="form-field"><label>Min. hviledage mellem vagter</label><input type="number" id="rule-rest-days"></div>
+                        <div class="form-field"><label>Standard rejse-buffer (dage)</label><input type="number" id="rule-trip-buffer"></div>
+                    </div>
+                    <div style="margin-top:14px; display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn btn-primary" onclick="saveCentralRules()">💾 Gem regler for semester</button>
+                        <button class="btn btn-secondary" onclick="exportSettingsJsFile()">⬇️ Download opdateret settings.js</button>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h2>Hurtig JSON-redigering (Skolerejser & Arrangementer)</h2>
+                    <p class="hint">Rediger listen direkte i JSON-format, eller kopiér den til <code>settings.js</code>.</p>
+                    <textarea id="activities-json-editor" rows="12"></textarea>
+                    <div style="margin-top:8px;">
+                        <button class="btn btn-primary" onclick="applyActivitiesJson()">✅ Anvend JSON</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top: 16px;">
+                <h2>Komplet semester-data (JSON)</h2>
+                <p class="hint">Gemmes via "Eksporter JSON" i toppen (gem fx som <code>data/efteraar.json</code> eller <code>data/foraar.json</code>).</p>
+                <textarea id="json-preview" rows="10" readonly></textarea>
+                <div style="margin-top:8px;">
+                    <button class="btn btn-secondary" onclick="copyJsonToClipboard()">📋 Kopier JSON</button>
+                </div>
+            </div>
+        </section>
     </div>
 
     <script src="settings.js"></script>
-    <script src="utils.js"></script>
-    <script src="parsers.js"></script>
+    <script src="parser.js"></script>
+    <script src="planner.js"></script>
+    <script src="analyzer.js"></script>
+    <script src="ui.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

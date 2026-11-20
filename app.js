@@ -1,501 +1,1073 @@
-let allTeachers = {};
-let isAdmin = false;
-let rawDebugSnapshot = "";
+const SETTINGS = window.APP_SETTINGS;
+let currentSemester = localStorage.getItem("vaertsplan_active_semester") || SETTINGS.defaultSemester;
 
-function renderWeeksSection(t) {
-    const formatWeekCode = (code) => {
-        if (code === "K/T") return "K/T – Kompetencedage & temadage";
-        if (code === "T") return "T – Temadage";
-        if (code === "O" || code === "x") return `${code} – Orlov`;
-        return code;
-    };
+let state = {
+    semester: currentSemester,
+    sourceName: "Ny plan",
+    lastSyncedAt: null,
+    rules: null,
+    teachers: [],
+    shifts: [],
+    activities: [],
+    acknowledgedFindings: []
+};
 
-    const pillsEl = document.getElementById("week-summary-pills");
-    pillsEl.innerHTML = `
-        <span class="w-pill">Normaluger: <strong>${t.ugeStats.uv}</strong></span>
-        <span class="w-pill">Rejser: <strong>${t.ugeStats.rejse}</strong></span>
-        <span class="w-pill">Tema: <strong>${t.ugeStats.tema}</strong></span>
-        ${t.ugeStats.sommer > 0 ? `<span class="w-pill">Sommer: <strong>${t.ugeStats.sommer}</strong></span>` : ""}
-        <span class="w-pill">Planl. / Fri: <strong>${t.ugeStats.plan} + ${t.ugeStats.fri}</strong></span>
-        <span class="w-pill">Ferie / FF: <strong>${t.ugeStats.ferie} + ${t.ugeStats.ff}</strong></span>
-        ${t.ugeStats.orlov > 0 ? `<span class="w-pill">Orlov: <strong>${t.ugeStats.orlov}</strong></span>` : ""}
-    `;
+let baseFileText = null;
+let hasLocalChanges = false;
+let selectedActivityTeachers = new Set();
+let editingActivityId = null;
 
-    const banner = document.getElementById("week-detail-banner");
-    banner.classList.add("hidden");
+window.teacherOverviewMode = "semester";
+window.semesterSnapshots = { efteraar: null, foraar: null };
 
-    const renderTimeline = (elId, weeks, semesterLabel) => {
-        const el = document.getElementById(elId);
-        el.innerHTML = "";
-        weeks.forEach((w) => {
-            const cell = document.createElement("div");
-            let cls = "w-1";
-            if (["u", "p"].includes(w.code)) cls = `w-${w.code}`;
-            else if (["F", "FF"].includes(w.code)) cls = "w-F";
-            else if (w.code === "O" || w.code === "x") cls = "w-O";
-            else if (w.code === "S") cls = "w-S";
-            else if (w.code !== "1" && w.code !== "0") cls = "w-rejse";
-
-            cell.className = "week-cell";
-            const peerStr = w.peers.length ? `Sammen med: ${w.peers.join(", ")}` : "";
-            const codeLabel = formatWeekCode(w.code);
-            cell.title = `${semesterLabel} uge ${w.ugeNr}: ${w.titel} (${codeLabel})${peerStr ? " · " + peerStr : ""}`;
-            cell.innerHTML = `
-                <div class="week-cell-head">${w.ugeNr}</div>
-                <div class="week-cell-body ${cls}">${w.code}</div>
-            `;
-            cell.addEventListener("click", () => {
-                banner.classList.remove("hidden");
-                banner.innerHTML = `<strong>${semesterLabel} – Uge ${w.ugeNr} (${codeLabel}):</strong> ${w.titel}${peerStr ? ` &nbsp;|&nbsp; <strong>${peerStr}</strong>` : ""}`;
-            });
-            el.appendChild(cell);
-        });
-    };
-
-    renderTimeline("timeline-efteraar", t.uger.efteraar, "Efterår");
-    renderTimeline("timeline-foraar", t.uger.foraar, "Forår");
-    renderTimeline("timeline-sommer", t.uger.sommer, "Sommer");
-
-    const sharedContainer = document.getElementById("shared-weeks-container");
-    sharedContainer.innerHTML = "";
-    if (!t.delteUger.length) {
-        sharedContainer.innerHTML = `<div style="font-size:0.83em;color:var(--muted);">Ingen særlige rejse- eller temauger registreret.</div>`;
-    } else {
-        t.delteUger.forEach((dw) => {
-            const peersText = dw.peers.length ? dw.peers.join(", ") : "Ingen andre med samme kode";
-            sharedContainer.innerHTML += `
-                <div class="shared-week-card">
-                    <strong>${dw.semester} uge ${dw.ugeNr} (${formatWeekCode(dw.code)})</strong> – ${dw.titel}<br>
-                    <span style="color:var(--muted);">Sammen med: <strong>${peersText}</strong></span>
-                </div>`;
-        });
-    }
+function getStorageKey(sem) {
+    return `vaertsplan_v8_${sem}`;
 }
 
-function renderLedger(t) {
-    const isReducedTime = t.norm < t.fullTimeNorm;
-    const normDiff = t.fullTimeNorm - t.norm;
-    const ftBadge = (ftVal) =>
-        isReducedTime && ftVal > 0 ? ` <span class="sub-ft">(fuldtid: ${formatNum(ftVal)} t)</span>` : "";
+function getEffectiveRules() {
+    const base = SETTINGS.semesters[currentSemester].rules;
+    return { ...base, ...(state.rules || {}) };
+}
 
-    const fagNetto = t.fagUv + t.fagRedE + t.fagRedF;
-    const sp = t.samvaerPoster;
-    const samvaerNetto = t.samvaerTotal;
+function getJsonFilename() {
+    const p = SETTINGS.semesters[currentSemester].defaultJsonPath || `${currentSemester}.json`;
+    return p.split("/").pop();
+}
 
-    const iAltInden =
-        t.iAltIndenOpgaver > 0
-            ? t.iAltIndenOpgaver
-            : fagNetto + samvaerNetto + t.planlaegningTotal + t.korteKurserTotal;
+function setStatusBadge(text, tooltip = "") {
+    const badge = document.getElementById("data-source-badge");
+    if (!badge) return;
+    badge.textContent = text;
+    badge.title = tooltip || text;
+}
 
-    const saerligeSum = t.saerligePoster.reduce((s, p) => s + p.timer, 0);
-    const opgavePuljeTilRaadighed =
-        t.opgavePuljeSheet !== null ? t.opgavePuljeSheet : t.norm - iAltInden - saerligeSum;
+// --- NORMALISERING & KOMPRIMERING AF AKTIVITETER ---
+function normalizeActivities(activities, rules) {
+    return (activities || []).map((act, idx) => {
+        const type = act.type || "school_trip";
+        const isTrip = type === "school_trip";
+        const isEvent = type === "event_host";
+        const wkndRate = isTrip ? rules.tripHostHours : rules.weekendHours;
+        const calcHours = (w, d, e) => w * wkndRate + d * rules.weekdayHours + e * rules.weekdayHours;
 
-    const brugteOpgaveTimer = t.opgaver.reduce((s, o) => s + o.opgaveTimer, 0);
-    const restOpgavePulje = opgavePuljeTilRaadighed - brugteOpgaveTimer;
+        if (Array.isArray(act.credits)) {
+            const existingMap = new Map(act.credits.map(c => [c.teacher, c]));
+            const teacherIds = [...new Set([
+                ...(Array.isArray(act.teachers) ? act.teachers : []),
+                ...act.credits.map(c => c.teacher)
+            ])].filter(Boolean);
 
-    const ledgerEl = document.getElementById("countdown-ledger");
-    ledgerEl.innerHTML = `
-        <div class="ledger-row start-row">
-            <div>
-                Samlet årsnorm
-                ${isReducedTime ? `<span class="fulltime-tag">Fuldtid: ${formatNum(t.fullTimeNorm)} t (−${formatNum(normDiff)} t)</span>` : ""}
-                <span class="ledger-sub">Ansættelsesgrad: ${t.grad}</span>
-            </div>
-            <div>${formatNum(t.norm)} t</div>
-        </div>
+            const credits = teacherIds.map(tId => {
+                const c = existingMap.get(tId) || {};
+                const w = c.tripWeekendHosts !== undefined ? Number(c.tripWeekendHosts) : (isTrip ? 1 : 0);
+                const d = c.tripDayHosts !== undefined ? Number(c.tripDayHosts) : (isTrip ? 1 : 0);
+                const e = c.eventHosts !== undefined ? Number(c.eventHosts) : (isEvent ? 1 : 0);
+                const hrs = c.hours !== undefined ? Number(c.hours) : calcHours(w, d, e);
+                return { teacher: tId, tripWeekendHosts: w, tripDayHosts: d, eventHosts: e, hours: hrs };
+            });
 
-        <div class="ledger-row">
-            <div>
-                <span class="ledger-title">Fag & Undervisning</span>
-                <span class="ledger-sub">
-                    Undervisning & forberedelse${ftBadge(t.fullTimeFagUv)}
-                    ${t.fagRedE !== 0 || t.fagRedF !== 0 ? ` · Reduktion E: ${formatNum(t.fagRedE)} t / F: ${formatNum(t.fagRedF)} t` : ""}
-                </span>
-            </div>
-            <div class="ledger-minus">− ${formatNum(fagNetto)} t</div>
-        </div>
-
-        <div class="ledger-row ledger-expandable">
-            <div style="flex:1;">
-                <span class="ledger-title">Samvær & Værtskab<span class="ledger-caret">▸</span></span>
-                ${isReducedTime ? `<span class="ledger-sub">Fuldtid: ${formatNum(t.fullTimeSamvaer)} t</span>` : ""}
-                <ul class="ledger-sub-list hidden">
-                    <li><span>Ad hoc samvær${ftBadge(sp.adHoc.ft)}</span><span>${formatNum(sp.adHoc.val)} t</span></li>
-                    <li><span>Arrangementer (familiedag, gensyn, arbejdsdag)${ftBadge(sp.arrangementer.ft)}</span><span>${formatNum(sp.arrangementer.val)} t</span></li>
-                    <li><span>Fællesmøder & elevdemokrati${ftBadge(sp.faellesmoeder.ft)}</span><span>${formatNum(sp.faellesmoeder.val)} t</span></li>
-                    <li><span>Intro & Outro${ftBadge(sp.introOutro.ft)}</span><span>${formatNum(sp.introOutro.val)} t</span></li>
-                    <li><span>Team${ftBadge(sp.team.ft)}</span><span>${formatNum(sp.team.val)} t</span></li>
-                    <li><span>Værtskaber & fester${ftBadge(sp.vaertPulje.ft)}</span><span>${formatNum(sp.vaertPulje.val)} t</span></li>
-                    ${sp.vaertRedE !== 0 ? `<li><span>Reduktion i værtsskab efterår</span><span>${formatNum(sp.vaertRedE)} t</span></li>` : ""}
-                    ${sp.vaertRedF !== 0 ? `<li><span>Reduktion i værtsskab forår</span><span>${formatNum(sp.vaertRedF)} t</span></li>` : ""}
-                </ul>
-            </div>
-            <div class="ledger-minus">− ${formatNum(samvaerNetto)} t</div>
-        </div>
-
-        <div class="ledger-row ledger-expandable">
-            <div style="flex:1;">
-                <span class="ledger-title">Planlægning<span class="ledger-caret">▸</span></span>
-                ${isReducedTime ? `<span class="ledger-sub">Fuldtid: ${formatNum(t.fullTimePlanlaegning)} t</span>` : ""}
-                <ul class="ledger-sub-list hidden">
-                    <li><span>Funktionsplan${ftBadge(t.funktionsplanTimer.ft)}</span><span>${formatNum(t.funktionsplanTimer.val)} t</span></li>
-                    <li><span>Lærermøder & Skolemøder${ftBadge(t.laerermoederTimer.ft)}</span><span>${formatNum(t.laerermoederTimer.val)} t</span></li>
-                </ul>
-            </div>
-            <div class="ledger-minus">− ${formatNum(t.planlaegningTotal)} t</div>
-        </div>
-
-        <div class="ledger-row ledger-expandable">
-            <div style="flex:1;">
-                <span class="ledger-title">Korte kurser<span class="ledger-caret">▸</span></span>
-                ${isReducedTime ? `<span class="ledger-sub">Fuldtid: ${formatNum(t.fullTimeKorteKurser)} t</span>` : ""}
-                <ul class="ledger-sub-list hidden">
-                    <li><span>Korte kurser excl. undervisning${ftBadge(t.fullTimeKorteKurser)}</span><span>${formatNum(t.korteKurserTotal)} t</span></li>
-                </ul>
-            </div>
-            <div class="ledger-minus">− ${formatNum(t.korteKurserTotal)} t</div>
-        </div>
-
-        ${
-            t.saerligePoster.length > 0
-                ? `<div class="ledger-row ledger-expandable">
-                    <div style="flex:1;">
-                        <span class="ledger-title">Særlige poster / reduktioner<span class="ledger-caret">▸</span></span>
-                        <ul class="ledger-sub-list hidden">
-                            ${t.saerligePoster.map((p) => `<li><span>${p.navn}</span><span>${p.timer > 0 ? "+" : ""}${formatNum(p.timer)} t</span></li>`).join("")}
-                        </ul>
-                    </div>
-                    <div class="ledger-minus">${saerligeSum > 0 ? "−" : "+"} ${formatNum(Math.abs(saerligeSum))} t</div>
-                   </div>`
-                : ""
+            return {
+                id: act.id || (Date.now() + idx),
+                type,
+                title: act.title || "Skolerejse",
+                start: act.start,
+                end: act.end || act.start,
+                bufferDays: act.bufferDays !== undefined ? Number(act.bufferDays) : rules.defaultTripBufferDays,
+                calendarLocked: Boolean(act.calendarLocked),
+                noSchoolHosts: Boolean(act.noSchoolHosts),
+                credits
+            };
         }
 
-        <div class="ledger-row ledger-subtotal">
-            <div>
-                Til rådighed til opgaver (Opgavepulje)
-                <span class="ledger-sub">
-                    Årsnorm (${formatNum(t.norm)} t) − faste puljer (${formatNum(iAltInden + saerligeSum)} t)
-                    ${isReducedTime ? ` · Fuldtid opgavepulje: ${formatNum(t.fullTimeOpgavePulje)} t` : ""}
-                </span>
-            </div>
-            <div>${formatNum(opgavePuljeTilRaadighed)} t</div>
-        </div>
+        const shared = (act.credits && typeof act.credits === "object") ? act.credits : {};
+        const defWknd = shared.tripWeekendHosts !== undefined ? Number(shared.tripWeekendHosts) : (isTrip ? 1 : 0);
+        const defDay = shared.tripDayHosts !== undefined ? Number(shared.tripDayHosts) : (isTrip ? 1 : 0);
+        const defEvt = shared.eventHosts !== undefined ? Number(shared.eventHosts) : (isEvent ? 1 : 0);
+        const overrides = shared.overrides || {};
 
-        <div class="ledger-row">
-            <div>
-                <span class="ledger-title">Brugte opgavetimer</span>
-                <span class="ledger-sub">Fordelt på ${t.opgaver.length} opgaveposter herunder</span>
-            </div>
-            <div class="ledger-minus">− ${formatNum(brugteOpgaveTimer)} t</div>
-        </div>
+        const teacherIds = [...new Set([
+            ...(Array.isArray(act.teachers) ? act.teachers : []),
+            ...Object.keys(overrides)
+        ])].filter(Boolean);
 
-        <div class="ledger-row ledger-final ${restOpgavePulje < 0 ? "negative" : ""}">
-            <div>Rest / buffer i opgavepulje</div>
-            <div>${restOpgavePulje >= 0 ? "+" : ""}${formatNum(restOpgavePulje)} t</div>
-        </div>
-    `;
-
-    ledgerEl.querySelectorAll(".ledger-expandable").forEach((row) => {
-        row.addEventListener("click", () => {
-            const list = row.querySelector(".ledger-sub-list");
-            const caret = row.querySelector(".ledger-caret");
-            if (!list) return;
-            const isOpen = !list.classList.contains("hidden");
-            list.classList.toggle("hidden");
-            if (caret) caret.textContent = isOpen ? "▸" : "▾";
+        const credits = teacherIds.map(tId => {
+            const ov = overrides[tId] || {};
+            const w = ov.tripWeekendHosts !== undefined ? Number(ov.tripWeekendHosts) : defWknd;
+            const d = ov.tripDayHosts !== undefined ? Number(ov.tripDayHosts) : defDay;
+            const e = ov.eventHosts !== undefined ? Number(ov.eventHosts) : defEvt;
+            const hrs = ov.hours !== undefined ? Number(ov.hours) : calcHours(w, d, e);
+            return {
+                teacher: tId,
+                tripWeekendHosts: w,
+                tripDayHosts: d,
+                eventHosts: e,
+                hours: hrs
+            };
         });
+
+        return {
+            id: act.id || (Date.now() + idx),
+            type,
+            title: act.title || "Skolerejse",
+            start: act.start,
+            end: act.end || act.start,
+            bufferDays: act.bufferDays !== undefined ? Number(act.bufferDays) : rules.defaultTripBufferDays,
+            calendarLocked: Boolean(act.calendarLocked),
+            noSchoolHosts: Boolean(act.noSchoolHosts),
+            credits
+        };
     });
 }
 
-function renderOpgaverOgFunktioner(t) {
-    const opgContainer = document.getElementById("opgaver-container");
-    opgContainer.innerHTML = "";
-    const opgGroups = {};
-    t.opgaver.forEach((o) => {
-        if (!opgGroups[o.kategori]) opgGroups[o.kategori] = [];
-        opgGroups[o.kategori].push(o);
+window.compactActivitiesForJson = function(activities, rules) {
+    return (activities || []).map(act => {
+        const list = Array.isArray(act.credits) ? act.credits : [];
+        const teachers = list.map(c => c.teacher);
+
+        const baseCredit = list[0] || {
+            tripWeekendHosts: act.type === "school_trip" ? 1 : 0,
+            tripDayHosts: act.type === "school_trip" ? 1 : 0,
+            eventHosts: 0,
+            hours: act.type === "school_trip"
+                ? (rules.tripHostHours + rules.weekdayHours)
+                : (act.type === "event_host" ? rules.weekdayHours : 0)
+        };
+
+        const creditsObj = {
+            tripWeekendHosts: baseCredit.tripWeekendHosts,
+            tripDayHosts: baseCredit.tripDayHosts,
+            eventHosts: baseCredit.eventHosts,
+            hours: baseCredit.hours
+        };
+
+        const overrides = {};
+        list.forEach(c => {
+            if (
+                c.tripWeekendHosts !== baseCredit.tripWeekendHosts ||
+                c.tripDayHosts !== baseCredit.tripDayHosts ||
+                c.eventHosts !== baseCredit.eventHosts ||
+                c.hours !== baseCredit.hours
+            ) {
+                overrides[c.teacher] = {
+                    tripWeekendHosts: c.tripWeekendHosts,
+                    tripDayHosts: c.tripDayHosts,
+                    eventHosts: c.eventHosts,
+                    hours: c.hours
+                };
+            }
+        });
+
+        if (Object.keys(overrides).length > 0) {
+            creditsObj.overrides = overrides;
+        }
+
+        return {
+            type: act.type,
+            title: act.title,
+            start: act.start,
+            end: act.end,
+            bufferDays: act.bufferDays,
+            calendarLocked: Boolean(act.calendarLocked),
+            noSchoolHosts: Boolean(act.noSchoolHosts),
+            teachers,
+            credits: creditsObj
+        };
     });
+};
 
-    if (!Object.keys(opgGroups).length) {
-        opgContainer.innerHTML = `<div style="font-size:0.84em;color:var(--muted);padding-top:6px;">Ingen særskilte rejser eller opgaver registreret.</div>`;
-    } else {
-        Object.keys(opgGroups).forEach((kat) => {
-            const catEl = document.createElement("div");
-            catEl.className = "cat-header";
-            catEl.textContent = kat;
-            opgContainer.appendChild(catEl);
+// --- FLYT REJSEDELTAGERE FRA REGNEARKETS SKOLEKOLONNE TIL REJSEVÆRTER ---
+function reconcileActivityTripSlots(targetState = state) {
+    const lockFromSheet = SETTINGS.csvMapping?.lockSheetAssignments !== false;
+    (targetState.shifts || []).forEach(s => {
+        const noSchoolActs = (targetState.activities || []).filter(a =>
+            a.type === "school_trip" && a.noSchoolHosts && s.date >= a.start && s.date < a.end
+        );
+        if (noSchoolActs.length === 0) return;
 
-            opgGroups[kat].forEach((o) => {
-                const itemEl = document.createElement("div");
-                itemEl.className = "compact-item";
-                const peersSpan = o.peers.length ? ` <span class="compact-peers">(med ${o.peers.join(", ")})</span>` : "";
+        const participants = new Set(noSchoolActs.flatMap(a => (a.credits || []).map(c => c.teacher)));
+        const existingTripIds = new Set((s.tripSlots || []).map(ts => ts.teacherId));
+        if (!Array.isArray(s.tripSlots)) s.tripSlots = [];
 
-                itemEl.innerHTML = `
-                    <div class="compact-row">
-                        <div class="compact-title">${o.navn}${peersSpan}<span class="compact-caret">▸</span></div>
-                        <div class="compact-val">${formatNum(o.opgaveTimer)} t</div>
-                    </div>
-                    <div class="compact-drawer hidden">${o.kildeTekst}</div>
-                `;
-                itemEl.addEventListener("click", () => {
-                    const drawer = itemEl.querySelector(".compact-drawer");
-                    const caret = itemEl.querySelector(".compact-caret");
-                    const isOpen = !drawer.classList.contains("hidden");
-                    drawer.classList.toggle("hidden");
-                    caret.textContent = isOpen ? "▸" : "▾";
+        (s.assigned || []).forEach(tId => {
+            if (tId && participants.has(tId) && !existingTripIds.has(tId)) {
+                s.tripSlots.push({
+                    teacherId: tId,
+                    activityId: noSchoolActs[0].id,
+                    isWeekendCredit: s.isWeekend,
+                    locked: lockFromSheet,
+                    fromSheet: true,
+                    isAutoDraft: false
                 });
-                opgContainer.appendChild(itemEl);
+                existingTripIds.add(tId);
+            }
+        });
+
+        s.reqHosts = 0;
+        s.assigned = [];
+        s.locked = [];
+        s.fromSheet = [];
+        s.isAutoDraft = [];
+    });
+}
+
+// --- UDTRÆK & PÅFØRING AF LÅSTE SKOLE- OG REJSEVAGTER ---
+function extractLockedShifts(shifts) {
+    const lockedShifts = {};
+    (shifts || []).forEach(s => {
+        if (!Array.isArray(s.locked) || !s.locked.some(Boolean)) return;
+        const row = s.assigned.map((id, idx) => (s.locked[idx] && id ? id : null));
+        while (row.length > 0 && row[row.length - 1] === null) {
+            row.pop();
+        }
+        if (row.length > 0) {
+            lockedShifts[s.date] = row;
+        }
+    });
+    return lockedShifts;
+}
+
+function extractLockedTripSlots(shifts) {
+    const lockedTripSlots = {};
+    (shifts || []).forEach(s => {
+        const lockedList = (s.tripSlots || []).filter(ts => ts.locked && ts.teacherId);
+        if (lockedList.length > 0) {
+            lockedTripSlots[s.date] = lockedList.map(ts => ({
+                teacherId: ts.teacherId,
+                isWeekendCredit: Boolean(ts.isWeekendCredit)
+            }));
+        }
+    });
+    return lockedTripSlots;
+}
+
+function applyLockedShiftsOverlay(shifts, lockedShifts, lockedTripSlots = null, activitiesList = state.activities) {
+    if (lockedShifts && typeof lockedShifts === "object") {
+        shifts.forEach(s => {
+            const lockedRow = lockedShifts[s.date];
+            if (!Array.isArray(lockedRow)) return;
+
+            const neededLen = Math.max(s.reqHosts, lockedRow.length);
+            s.reqHosts = neededLen;
+            if (!Array.isArray(s.assigned)) s.assigned = Array(neededLen).fill(null);
+            if (!Array.isArray(s.locked)) s.locked = Array(neededLen).fill(false);
+            if (!Array.isArray(s.isAutoDraft)) s.isAutoDraft = Array(neededLen).fill(false);
+
+            while (s.assigned.length < neededLen) s.assigned.push(null);
+            while (s.locked.length < neededLen) s.locked.push(false);
+            while (s.isAutoDraft.length < neededLen) s.isAutoDraft.push(false);
+
+            lockedRow.forEach((teacherId, idx) => {
+                if (teacherId) {
+                    s.assigned[idx] = teacherId;
+                    s.locked[idx] = true;
+                    s.isAutoDraft[idx] = false;
+                }
             });
         });
     }
 
-    document.getElementById("fp-total-pill").textContent = `${formatNum(t.fpPointTildelt || 50)} pt tildelt`;
-    const funkContainer = document.getElementById("funktioner-container");
-    funkContainer.innerHTML = "";
+    if (lockedTripSlots && typeof lockedTripSlots === "object") {
+        shifts.forEach(s => {
+            const list = lockedTripSlots[s.date];
+            if (!Array.isArray(list)) return;
+            const matchingAct = (activitiesList || []).find(a => s.date >= a.start && s.date <= a.end);
+            const existingIds = new Set((s.tripSlots || []).map(ts => ts.teacherId));
+            if (!Array.isArray(s.tripSlots)) s.tripSlots = [];
 
-    const preferredOrder = [
-        "Fælles & arrangementer",
-        "Udstyr & lokaler",
-        "Særlige ansvarsområder",
-        "Udvalg & tillidshverv",
-        "Elevudvalg & foreninger",
-        "Rejseansvar (kommende år)"
-    ];
-
-    const funkGroups = {};
-    t.funktioner.forEach((f) => {
-        if (!funkGroups[f.kategori]) funkGroups[f.kategori] = [];
-        funkGroups[f.kategori].push(f);
-    });
-
-    const orderedKeys = [
-        ...preferredOrder.filter((k) => funkGroups[k]),
-        ...Object.keys(funkGroups).filter((k) => !preferredOrder.includes(k))
-    ];
-
-    if (!orderedKeys.length) {
-        funkContainer.innerHTML = `<div style="font-size:0.84em;color:var(--muted);padding-top:6px;">Ingen funktioner tildelt.</div>`;
-    } else {
-        orderedKeys.forEach((kat) => {
-            const catEl = document.createElement("div");
-            catEl.className = "cat-header";
-            catEl.textContent = kat;
-            funkContainer.appendChild(catEl);
-
-            funkGroups[kat].forEach((f) => {
-                const itemEl = document.createElement("div");
-                itemEl.className = "compact-item";
-                const peersSpan = f.peers.length ? ` <span class="compact-peers">(med ${f.peers.join(", ")})</span>` : "";
-
-                const extraDetails = [];
-                if (f.totalPoint !== f.point) extraDetails.push(`Samlet funktion: ${formatNum(f.totalPoint)} pt`);
-                if (f.kommentar) extraDetails.push(f.kommentar);
-                const hasDetails = extraDetails.length > 0;
-
-                itemEl.innerHTML = `
-                    <div class="compact-row">
-                        <div class="compact-title">${f.navn}${peersSpan}${hasDetails ? `<span class="compact-caret">▸</span>` : ""}</div>
-                        <div class="compact-val">${formatNum(f.point)} pt</div>
-                    </div>
-                    ${hasDetails ? `<div class="compact-drawer fp-drawer hidden">${extraDetails.join(" · ")}</div>` : ""}
-                `;
-                if (hasDetails) {
-                    itemEl.addEventListener("click", () => {
-                        const drawer = itemEl.querySelector(".compact-drawer");
-                        const caret = itemEl.querySelector(".compact-caret");
-                        const isOpen = !drawer.classList.contains("hidden");
-                        drawer.classList.toggle("hidden");
-                        caret.textContent = isOpen ? "▸" : "▾";
+            list.forEach(item => {
+                if (item.teacherId && !existingIds.has(item.teacherId)) {
+                    s.tripSlots.push({
+                        teacherId: item.teacherId,
+                        activityId: matchingAct ? matchingAct.id : null,
+                        isWeekendCredit: Boolean(item.isWeekendCredit),
+                        locked: true,
+                        isAutoDraft: false
                     });
                 }
-                funkContainer.appendChild(itemEl);
             });
         });
     }
 }
 
-function renderFerieSection(t) {
-    const MAX_FERIEFRIDAGE = 5;
-    let brugtFF = 0;
-    let afventerFF = 0;
-
-    t.ferie.forEach((f) => {
-        if (!f.type.toLowerCase().includes("feriefridag")) return;
-        const sLow = f.status.toLowerCase();
-        if (sLow.includes("ikke godkendt") || sLow.includes("afvist") || sLow === "nej") return;
-
-        const dageNum = parseNum(f.dage);
-        brugtFF += dageNum;
-        if (!(sLow.includes("godkendt") || sLow.includes("registreret") || sLow === "ja" || sLow === "ok")) {
-            afventerFF += dageNum;
-        }
-    });
-
-    const restFF = MAX_FERIEFRIDAGE - brugtFF;
-    const ffPill = document.getElementById("ff-count-pill");
-    ffPill.classList.remove("ff-ok", "ff-over");
-
-    if (brugtFF > MAX_FERIEFRIDAGE) {
-        ffPill.classList.add("ff-over");
-        ffPill.textContent = `Feriefridage: ${formatNum(brugtFF)} / ${MAX_FERIEFRIDAGE} dage (+${formatNum(brugtFF - MAX_FERIEFRIDAGE)} over)`;
-    } else {
-        if (brugtFF === MAX_FERIEFRIDAGE && afventerFF === 0) ffPill.classList.add("ff-ok");
-        const pendingNote = afventerFF > 0 ? ` · ${formatNum(afventerFF)} afventer` : "";
-        ffPill.textContent = `Feriefridage: ${formatNum(brugtFF)} / ${MAX_FERIEFRIDAGE} brugt (${formatNum(restFF)} tilbage${pendingNote})`;
+window.buildExportPayload = function(currentState, rules) {
+    const payload = {
+        semester: currentSemester,
+        activities: window.compactActivitiesForJson(currentState.activities, rules),
+        lockedShifts: extractLockedShifts(currentState.shifts),
+        lockedTripSlots: extractLockedTripSlots(currentState.shifts)
+    };
+    if (Array.isArray(currentState.acknowledgedFindings) && currentState.acknowledgedFindings.length > 0) {
+        payload.acknowledgedFindings = currentState.acknowledgedFindings;
     }
-
-    const ferieContainer = document.getElementById("ferie-container");
-    ferieContainer.innerHTML = "";
-    if (!t.ferie.length) {
-        ferieContainer.innerHTML = `<div style="font-size:0.84em;color:var(--muted);padding-top:6px;">Ingen registrerede ønsker.</div>`;
-        return;
+    if (currentState.rules) {
+        payload.rules = currentState.rules;
     }
-
-    t.ferie.forEach((f) => {
-        let statusClass = "status-afventer";
-        const sLow = f.status.toLowerCase();
-        if (sLow.includes("ikke godkendt") || sLow.includes("afvist") || sLow === "nej") statusClass = "status-afvist";
-        else if (sLow.includes("godkendt") || sLow === "ja" || sLow === "ok") statusClass = "status-godkendt";
-        else if (sLow.includes("registreret")) statusClass = "status-registreret";
-
-        const ugeStr = f.uge ? `Uge ${f.uge}` : "";
-        const dageStr = f.dage ? `${f.dage} ${f.dage === "1" ? "dag" : "dage"}` : "";
-        const metaParts = [ugeStr, dageStr].filter(Boolean).join(" · ");
-        const titel = `${f.type || "Friønske"}${metaParts ? ` (${metaParts})` : ""}`;
-
-        const dateRange = f.datoFra && f.datoTil ? `${f.datoFra} – ${f.datoTil}` : f.datoFra || f.datoTil || "";
-        const subParts = [dateRange, f.kommentar].filter(Boolean).join(" · ");
-
-        ferieContainer.innerHTML += `
-            <div class="ferie-card">
-                <div class="ferie-header">
-                    <strong>${titel}</strong>
-                    <span class="status-pill ${statusClass}">${f.status}</span>
-                </div>
-                ${subParts ? `<div class="ferie-body">${subParts}</div>` : ""}
-            </div>`;
-    });
-}
-
-function renderTeacher(initials) {
-    const t = allTeachers[initials];
-    if (!t) return;
-
-    if (isAdmin) sessionStorage.setItem("admin_selected_teacher", initials);
-
-    document.getElementById("t-navn").textContent = t.initialer;
-    document.getElementById("t-grad").textContent = t.grad;
-    document.getElementById("t-uger-stat").textContent = t.undervisningsUgerInfo || "--";
-
-    renderWeeksSection(t);
-    renderLedger(t);
-    renderOpgaverOgFunktioner(t);
-    renderFerieSection(t);
-}
+    return payload;
+};
 
 // --- INITIALISERING ---
-document.addEventListener("DOMContentLoaded", async () => {
-    const params = new URLSearchParams(window.location.search);
-    const adminParam = params.get("admin");
-    const userToken = params.get("u");
+async function initApp() {
+    const semSelect = document.getElementById("semester-select");
+    if (semSelect) semSelect.value = currentSemester;
 
-    let allowedTeacher = null;
-    if (adminParam && adminParam === CONFIG.ADMIN_CODE) isAdmin = true;
-    else if (userToken) allowedTeacher = verifyToken(userToken);
+    const rawSaved = localStorage.getItem(getStorageKey(currentSemester));
+    const parsedWrapper = rawSaved ? JSON.parse(rawSaved) : null;
+    const savedState = parsedWrapper ? (parsedWrapper.state || parsedWrapper) : null;
+    const savedBaseText = parsedWrapper?.baseFileText || null;
+    const savedDirty = parsedWrapper ? Boolean(parsedWrapper.dirty ?? true) : false;
 
-    if (!isAdmin && !allowedTeacher) {
-        document.getElementById("lock-screen").classList.remove("hidden");
-        if (userToken) document.getElementById("lock-error").classList.remove("hidden");
-        document.getElementById("admin-login-btn").addEventListener("click", () => {
-            const code = document.getElementById("admin-code-input").value.trim();
-            if (code === CONFIG.ADMIN_CODE) window.location.search = `?admin=${encodeURIComponent(code)}`;
-            else document.getElementById("lock-error").classList.remove("hidden");
+    const jsonPath = SETTINGS.semesters[currentSemester].defaultJsonPath;
+    const shortPath = jsonPath ? jsonPath.replace("./", "") : "";
+    let diskFileText = null;
+    let diskOverlay = null;
+
+    if (jsonPath) {
+        try {
+            const bustUrl = jsonPath + (jsonPath.includes("?") ? "&" : "?") + "t=" + Date.now();
+            const res = await fetch(bustUrl);
+            if (res.ok) {
+                diskFileText = (await res.text()).trim();
+                diskOverlay = JSON.parse(diskFileText);
+            }
+        } catch {}
+    }
+
+    const fileChangedOnDisk = diskFileText !== null && savedBaseText !== diskFileText;
+
+    if (diskOverlay && (!savedState || !savedDirty || fileChangedOnDisk)) {
+        const baseRules = { ...SETTINGS.semesters[currentSemester].rules, ...(diskOverlay.rules || {}) };
+        state = {
+            semester: currentSemester,
+            sourceName: shortPath,
+            lastSyncedAt: savedState?.lastSyncedAt || null,
+            rules: diskOverlay.rules || null,
+            teachers: savedState?.teachers || diskOverlay.teachers || [],
+            shifts: savedState?.shifts || diskOverlay.shifts || [],
+            activities: normalizeActivities(diskOverlay.activities, baseRules),
+            acknowledgedFindings: diskOverlay.acknowledgedFindings || []
+        };
+
+        state.shifts.forEach(s => {
+            s.locked = Array(s.reqHosts).fill(false);
+            s.tripSlots = [];
         });
+        applyLockedShiftsOverlay(state.shifts, diskOverlay.lockedShifts, diskOverlay.lockedTripSlots, state.activities);
+        reconcileActivityTripSlots(state);
+
+        baseFileText = diskFileText;
+        hasLocalChanges = false;
+        persistWrapper();
+
+        if (SETTINGS.semesters[currentSemester].googleSheetCsvUrl) {
+            await syncFromGoogleSheet(true, diskOverlay.lockedShifts, diskOverlay.lockedTripSlots);
+        } else {
+            onDataLoaded(`📁 Fil: ${shortPath}`);
+        }
         return;
     }
 
-    document.getElementById("main-app").classList.remove("hidden");
-    const leaderBar = document.getElementById("leader-bar");
-    if (isAdmin) leaderBar.classList.remove("hidden");
+    if (savedState) {
+        state = savedState;
+        if (!Array.isArray(state.acknowledgedFindings)) state.acknowledgedFindings = [];
+        state.activities = normalizeActivities(state.activities, getEffectiveRules());
+        reconcileActivityTripSlots(state);
+        baseFileText = diskFileText;
+        hasLocalChanges = true;
+        persistWrapper();
+        onDataLoaded(`📝 Arbejdskopi (localStorage)`, `Lokale ændringer · eksporter til ${shortPath}`);
+        return;
+    }
 
-    const toggleWeeksBtn = document.getElementById("toggle-weeks-btn");
-    const weeksBody = document.getElementById("weeks-collapsible-body");
-    const setWeeksExpanded = (expanded) => {
-        weeksBody.classList.toggle("collapsed", !expanded);
-        toggleWeeksBtn.textContent = expanded ? "Skjul ugeplan ▴" : "Vis ugeplan ▾";
-        localStorage.setItem("weeks_expanded", expanded ? "1" : "0");
+    state = {
+        semester: currentSemester,
+        sourceName: "Ny plan",
+        lastSyncedAt: null,
+        rules: null,
+        teachers: [],
+        shifts: [],
+        activities: normalizeActivities(SETTINGS.semesters[currentSemester].presetActivities || [], getEffectiveRules()),
+        acknowledgedFindings: []
     };
-    setWeeksExpanded(localStorage.getItem("weeks_expanded") === "1");
-    toggleWeeksBtn.addEventListener("click", () => setWeeksExpanded(weeksBody.classList.contains("collapsed")));
+    baseFileText = null;
+    hasLocalChanges = false;
 
+    if (SETTINGS.semesters[currentSemester].googleSheetCsvUrl) {
+        await syncFromGoogleSheet(true);
+    } else {
+        onDataLoaded(`Klar`, `Importer CSV eller opret ${shortPath}`);
+    }
+}
+
+function persistWrapper() {
+    state.semester = currentSemester;
+    window.semesterSnapshots[currentSemester] = state;
+    localStorage.setItem(getStorageKey(currentSemester), JSON.stringify({
+        baseFileText,
+        dirty: hasLocalChanges,
+        state
+    }));
+}
+
+function switchSemester(newSem) {
+    currentSemester = newSem;
+    localStorage.setItem("vaertsplan_active_semester", newSem);
+    selectedActivityTeachers.clear();
+    editingActivityId = null;
+    initApp();
+}
+
+function saveState(rerender = true) {
+    hasLocalChanges = true;
+    persistWrapper();
+    const shortPath = (SETTINGS.semesters[currentSemester].defaultJsonPath || "").replace("./", "");
+    setStatusBadge(
+        "📝 Ikke gemt i fil",
+        `Lokale ændringer i localStorage${shortPath ? " · Klik 'Eksporter JSON' for at overskrive " + shortPath : ""}`
+    );
+    if (rerender) renderAll();
+}
+
+function onDataLoaded(badgeText, tooltip = "") {
+    setStatusBadge(badgeText, tooltip);
+    populateMonthFilter();
+    renderAll();
+    preloadOtherSemesters();
+}
+
+function renderAll() {
+    window.AppUI.renderAll(state, getEffectiveRules(), selectedActivityTeachers, editingActivityId);
+}
+
+// --- ÅRSOVERSIGT: INDLÆS BEGGE SEMESTRE ---
+async function loadSemesterSnapshot(semKey, forceFresh = false) {
+    if (semKey === currentSemester && !forceFresh) {
+        window.semesterSnapshots[semKey] = state;
+        return state;
+    }
+
+    if (!forceFresh) {
+        const rawSaved = localStorage.getItem(getStorageKey(semKey));
+        if (rawSaved) {
+            const parsed = JSON.parse(rawSaved);
+            const savedSt = parsed.state || parsed;
+            if (savedSt && Array.isArray(savedSt.teachers) && savedSt.teachers.length > 0) {
+                savedSt.activities = normalizeActivities(savedSt.activities, {
+                    ...SETTINGS.semesters[semKey].rules,
+                    ...(savedSt.rules || {})
+                });
+                reconcileActivityTripSlots(savedSt);
+                window.semesterSnapshots[semKey] = savedSt;
+                return savedSt;
+            }
+        }
+    }
+
+    const semCfg = SETTINGS.semesters[semKey];
+    if (!semCfg) return null;
+
+    let diskOverlay = null;
+    if (semCfg.defaultJsonPath) {
+        try {
+            const res = await fetch(semCfg.defaultJsonPath + "?t=" + Date.now());
+            if (res.ok) diskOverlay = await res.json();
+        } catch {}
+    }
+
+    const baseRules = { ...semCfg.rules, ...(diskOverlay?.rules || {}) };
+    let snap = {
+        semester: semKey,
+        rules: diskOverlay?.rules || null,
+        teachers: diskOverlay?.teachers || [],
+        shifts: diskOverlay?.shifts || [],
+        activities: normalizeActivities(diskOverlay?.activities || semCfg.presetActivities || [], baseRules)
+    };
+
+    if (semCfg.googleSheetCsvUrl) {
+        try {
+            const bustUrl = semCfg.googleSheetCsvUrl + (semCfg.googleSheetCsvUrl.includes("?") ? "&" : "?") + "t=" + Date.now();
+            const res = await fetch(bustUrl);
+            if (res.ok) {
+                const csvText = await res.text();
+                snap = window.SheetParser.parseAndMerge(csvText, "Google Sheets", snap, baseRules);
+            }
+        } catch {}
+    }
+
+    if (diskOverlay?.lockedShifts || diskOverlay?.lockedTripSlots) {
+        snap.shifts.forEach(s => {
+            s.locked = Array(s.reqHosts).fill(false);
+            s.tripSlots = [];
+        });
+        applyLockedShiftsOverlay(snap.shifts, diskOverlay.lockedShifts, diskOverlay.lockedTripSlots, snap.activities);
+    }
+    snap.activities = normalizeActivities(snap.activities, baseRules);
+    reconcileActivityTripSlots(snap);
+    window.semesterSnapshots[semKey] = snap;
+    return snap;
+}
+
+async function preloadOtherSemesters() {
+    window.semesterSnapshots[currentSemester] = state;
+    for (const semKey of Object.keys(SETTINGS.semesters)) {
+        if (semKey !== currentSemester && !window.semesterSnapshots[semKey]) {
+            await loadSemesterSnapshot(semKey, false);
+        }
+    }
+    if (window.teacherOverviewMode === "year") {
+        renderAll();
+    }
+}
+
+async function setTeacherOverviewMode(mode) {
+    window.teacherOverviewMode = mode;
+    if (mode === "year") {
+        window.semesterSnapshots[currentSemester] = state;
+        renderAll();
+        for (const semKey of Object.keys(SETTINGS.semesters)) {
+            if (!window.semesterSnapshots[semKey]) {
+                await loadSemesterSnapshot(semKey, false);
+            }
+        }
+    }
+    renderAll();
+}
+
+async function refreshAllSemestersForYear() {
+    await syncFromGoogleSheet(false);
+    for (const semKey of Object.keys(SETTINGS.semesters)) {
+        if (semKey !== currentSemester) {
+            await loadSemesterSnapshot(semKey, true);
+        }
+    }
+    renderAll();
+}
+
+// --- OPDATERING FRA REGNEARK ---
+async function syncFromGoogleSheet(keepClean = false, explicitLockedShifts = null, explicitLockedTrips = null) {
+    const url = SETTINGS.semesters[currentSemester].googleSheetCsvUrl;
+    if (!url) {
+        alert("Der er ikke sat et CSV-link for dette semester i settings.js. Brug 'Importer CSV' eller indsæt linket i settings.js.");
+        return;
+    }
+    setStatusBadge("⏳ Henter...");
     try {
-        const [ugeRes, arbRes, funkRes, ferieRes] = await Promise.all([
-            fetchSheet(CONFIG.SHEET_LINKS.ugefordeling, "Ugefordeling"),
-            fetchSheet(CONFIG.SHEET_LINKS.arbejdstid, "Arbejdstid_Opgaver"),
-            fetchSheet(CONFIG.SHEET_LINKS.funktionsplan, "Funktionsplan_E26-F27"),
-            fetchSheet(CONFIG.SHEET_LINKS.ferie, "Ferieønsker")
-        ]);
+        const bustUrl = url + (url.includes("?") ? "&" : "?") + "t=" + Date.now();
+        const res = await fetch(bustUrl);
+        if (!res.ok) throw new Error("Netværksfejl");
+        const csvText = await res.text();
 
-        const built = buildAllTeachers(ugeRes, arbRes, funkRes, ferieRes);
-        allTeachers = built.data;
+        state = window.SheetParser.parseAndMerge(csvText, "Google Sheets", state, getEffectiveRules());
+        if (explicitLockedShifts || explicitLockedTrips) {
+            applyLockedShiftsOverlay(state.shifts, explicitLockedShifts, explicitLockedTrips, state.activities);
+        }
+        state.activities = normalizeActivities(state.activities, getEffectiveRules());
+        reconcileActivityTripSlots(state);
 
-        const select = document.getElementById("teacher-select");
-        if (isAdmin) {
-            const d = built.diagnostics;
-            const statusDiv = document.createElement("div");
-            statusDiv.className = "diag-bar";
-            const fmtStatus = (label, item) =>
-                item.count > 0 ? `✅ ${label} (${item.count})` : `⚠️ ${label}: ${item.msg}`;
-            statusDiv.innerHTML = `
-                ${fmtStatus("Uge", d.uge)} &nbsp;|&nbsp;
-                ${fmtStatus("Arbejdstid", d.arb)} &nbsp;|&nbsp;
-                ${fmtStatus("Funk.", d.funk)} &nbsp;|&nbsp;
-                ${fmtStatus("Ferie", d.ferie)}
-                <button id="toggle-raw-btn" class="btn-small" style="margin-left:10px;">🔍 Vis rå ark-data</button>
-                <pre id="raw-debug-pre" class="debug-box hidden"></pre>
-            `;
-            leaderBar.appendChild(statusDiv);
-
-            document.getElementById("toggle-raw-btn").addEventListener("click", () => {
-                const pre = document.getElementById("raw-debug-pre");
-                pre.textContent = rawDebugSnapshot;
-                pre.classList.toggle("hidden");
-            });
-
-            CONFIG.LAERERE.forEach((l) => {
-                const opt = document.createElement("option");
-                opt.value = l;
-                opt.textContent = `${l} (${allTeachers[l]?.grad || ""})`;
-                select.appendChild(opt);
-            });
-
-            const remembered = sessionStorage.getItem("admin_selected_teacher");
-            if (remembered && allTeachers[remembered]) select.value = remembered;
-
-            select.addEventListener("change", (e) => renderTeacher(e.target.value));
-
-            const copyBtn = document.getElementById("copy-link-btn");
-            copyBtn.addEventListener("click", async () => {
-                await navigator.clipboard.writeText(getTeacherUrl(select.value));
-                copyBtn.textContent = `✅ Link til ${select.value} kopieret!`;
-                setTimeout(() => (copyBtn.textContent = "🔗 Kopier hemmeligt lærer-link"), 2500);
-            });
-
-            const copyAllBtn = document.getElementById("copy-all-btn");
-            copyAllBtn.addEventListener("click", async () => {
-                const lines = CONFIG.LAERERE.map((l) => `${l}: ${getTeacherUrl(l)}`);
-                await navigator.clipboard.writeText(lines.join("\n"));
-                copyAllBtn.textContent = "✅ Alle 18 links kopieret!";
-                setTimeout(() => (copyAllBtn.textContent = "📋 Kopier alle links"), 2500);
-            });
-
-            renderTeacher(select.value);
+        if (keepClean) {
+            hasLocalChanges = false;
+            persistWrapper();
+            const shortPath = (SETTINGS.semesters[currentSemester].defaultJsonPath || "").replace("./", "");
+            onDataLoaded(`📁 ${shortPath} · kl. ${state.lastSyncedAt}`);
         } else {
-            renderTeacher(allowedTeacher);
+            saveState(true);
         }
     } catch (err) {
-        console.error(err);
-        document.getElementById("t-navn").textContent = `Fejl: ${err.message}`;
+        alert("Kunne ikke hente fra regneark: " + err.message);
+        setStatusBadge("❌ Fejl", err.message);
     }
-});
+}
+
+function handleCsvUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+        try {
+            state = window.SheetParser.parseAndMerge(e.target.result, file.name, state, getEffectiveRules());
+            state.activities = normalizeActivities(state.activities, getEffectiveRules());
+            reconcileActivityTripSlots(state);
+            saveState(true);
+        } catch (err) {
+            alert(err.message);
+        }
+    };
+    reader.readAsText(file, "UTF-8");
+    event.target.value = "";
+}
+
+// --- AUTO-UDKAST & TILDELING ---
+function generateOptimalDraft() {
+    if (!confirm("Vil du generere et samlet optimalt forslag for både rejseværter og skoleværter? (Alle låste vagter 🔒 bevares)")) return;
+    state = window.HostPlanner.generateOptimalDraft(state, getEffectiveRules());
+    saveState();
+}
+
+function clearUnlockedDrafts() {
+    if (!confirm("Vil du rydde alle ulåste vagter (inkl. ulåste rejsevagter)?")) return;
+    state.shifts.forEach(s => {
+        for (let i = 0; i < s.reqHosts; i++) {
+            if (!s.locked?.[i]) {
+                s.assigned[i] = null;
+                if (s.isAutoDraft) s.isAutoDraft[i] = false;
+            }
+        }
+        if (Array.isArray(s.tripSlots)) {
+            s.tripSlots = s.tripSlots.filter(ts => ts.locked);
+        }
+    });
+    saveState();
+}
+
+function assignHost(shiftId, slotIndex, teacherId) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || shift.locked?.[slotIndex]) return;
+    shift.assigned[slotIndex] = teacherId || null;
+    if (!Array.isArray(shift.isAutoDraft)) shift.isAutoDraft = Array(shift.reqHosts).fill(false);
+    shift.isAutoDraft[slotIndex] = false;
+    if (!teacherId) shift.locked[slotIndex] = false;
+    saveState();
+}
+
+function toggleLock(shiftId, slotIndex) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || !shift.assigned[slotIndex]) return;
+    if (!Array.isArray(shift.locked)) shift.locked = Array(shift.reqHosts).fill(false);
+    if (!Array.isArray(shift.fromSheet)) shift.fromSheet = Array(shift.reqHosts).fill(false);
+    shift.locked[slotIndex] = !shift.locked[slotIndex];
+    shift.fromSheet[slotIndex] = false;
+    if (shift.locked[slotIndex] && shift.isAutoDraft) shift.isAutoDraft[slotIndex] = false;
+    saveState();
+}
+
+function lockAllAssigned() {
+    state.shifts.forEach(s => {
+        if (!Array.isArray(s.locked)) s.locked = Array(s.reqHosts).fill(false);
+        s.assigned.forEach((id, idx) => {
+            if (id) {
+                s.locked[idx] = true;
+                if (s.isAutoDraft) s.isAutoDraft[idx] = false;
+            }
+        });
+        (s.tripSlots || []).forEach(ts => {
+            if (ts.teacherId) {
+                ts.locked = true;
+                ts.isAutoDraft = false;
+            }
+        });
+    });
+    saveState();
+}
+
+function setShiftCategory(shiftId, newCat) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (shift) {
+        shift.category = newCat || "";
+        saveState();
+    }
+}
+
+// --- ANALYSE-HANDLINGER (CHECKBOX & 1-KLIKS BYT/FJERN) ---
+function toggleFindingAck(findingId) {
+    if (!Array.isArray(state.acknowledgedFindings)) state.acknowledgedFindings = [];
+    const idx = state.acknowledgedFindings.indexOf(findingId);
+    if (idx === -1) state.acknowledgedFindings.push(findingId);
+    else state.acknowledgedFindings.splice(idx, 1);
+    saveState();
+}
+
+function swapHostOnShift(shiftId, slotIndex, newTeacherId) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || !newTeacherId) return;
+    shift.assigned[slotIndex] = newTeacherId;
+    if (!Array.isArray(shift.locked)) shift.locked = Array(shift.reqHosts).fill(false);
+    if (!Array.isArray(shift.fromSheet)) shift.fromSheet = Array(shift.reqHosts).fill(false);
+    if (!Array.isArray(shift.isAutoDraft)) shift.isAutoDraft = Array(shift.reqHosts).fill(false);
+    shift.locked[slotIndex] = false;
+    shift.fromSheet[slotIndex] = false;
+    shift.isAutoDraft[slotIndex] = false;
+    saveState();
+}
+
+function removeHostFromAnalysis(shiftId, slotIndex) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift) return;
+    shift.assigned[slotIndex] = null;
+    if (Array.isArray(shift.locked)) shift.locked[slotIndex] = false;
+    if (Array.isArray(shift.fromSheet)) shift.fromSheet[slotIndex] = false;
+    if (Array.isArray(shift.isAutoDraft)) shift.isAutoDraft[slotIndex] = false;
+    saveState();
+}
+
+// --- REJSEVÆRT-HANDLINGER PÅ ENKELTE DAGE ---
+function assignTripHost(shiftId, teacherId, activityId) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || !teacherId) return;
+    if (!Array.isArray(shift.tripSlots)) shift.tripSlots = [];
+
+    const act = state.activities.find(a => a.id === activityId);
+    let isWeekendCredit = shift.isWeekend;
+    if (act && act.type !== "event_host") {
+        const prog = window.HostPlanner.getActivityProgress(state, act)[teacherId];
+        if (prog && prog.remWknd > 0 && prog.remDay === 0) isWeekendCredit = true;
+        else if (prog && prog.remDay > 0 && prog.remWknd === 0) isWeekendCredit = false;
+    }
+
+    shift.tripSlots.push({
+        teacherId,
+        activityId: activityId || null,
+        isWeekendCredit,
+        locked: false,
+        isAutoDraft: false
+    });
+    saveState();
+}
+
+function removeTripHost(shiftId, tripSlotIndex) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || !Array.isArray(shift.tripSlots)) return;
+    if (shift.tripSlots[tripSlotIndex]?.locked) return;
+    shift.tripSlots.splice(tripSlotIndex, 1);
+    saveState();
+}
+
+function toggleTripSlotLock(shiftId, tripSlotIndex) {
+    const shift = state.shifts.find(s => s.id === shiftId);
+    if (!shift || !Array.isArray(shift.tripSlots) || !shift.tripSlots[tripSlotIndex]) return;
+    shift.tripSlots[tripSlotIndex].locked = !shift.tripSlots[tripSlotIndex].locked;
+    if (shift.tripSlots[tripSlotIndex].locked) {
+        shift.tripSlots[tripSlotIndex].isAutoDraft = false;
+        shift.tripSlots[tripSlotIndex].fromSheet = false;
+    }
+    saveState();
+}
+
+function autoDistributeActivity(actId) {
+    state = window.HostPlanner.distributeTripHosts(state, getEffectiveRules(), actId);
+    saveState();
+}
+
+// --- SKOLEREJSER & ARRANGEMENTER (FORMULAR) ---
+function toggleActivityTeacher(tId) {
+    if (selectedActivityTeachers.has(tId)) selectedActivityTeachers.delete(tId);
+    else selectedActivityTeachers.add(tId);
+    renderAll();
+}
+
+function onActivityTypeChange() {
+    renderAll();
+}
+
+function recalcCreditRow(inputEl) {
+    const tr = inputEl.closest("tr");
+    const r = getEffectiveRules();
+    const isTrip = document.getElementById("act-type")?.value === "school_trip";
+    const wkndRate = isTrip ? r.tripHostHours : r.weekendHours;
+    const wknd = parseFloat(tr.querySelector(".cr-trip-wknd")?.value) || 0;
+    const day = parseFloat(tr.querySelector(".cr-trip-day")?.value) || 0;
+    const total = wknd + day;
+    const hrs = wknd * wkndRate + day * r.weekdayHours;
+    tr.querySelector(".cr-summary").innerHTML = `<strong>${total}</strong> værtsskab (${hrs} t)`;
+}
+
+function saveActivity() {
+    const type = document.getElementById("act-type").value;
+    const title = document.getElementById("act-title").value.trim();
+    const start = document.getElementById("act-start").value;
+    const end = document.getElementById("act-end").value || start;
+    const r = getEffectiveRules();
+    const bufferDays = parseInt(document.getElementById("act-buffer").value, 10) ?? r.defaultTripBufferDays;
+
+    const noSchoolHostsCheckbox = document.getElementById("act-no-school");
+    const noSchoolHosts = noSchoolHostsCheckbox ? noSchoolHostsCheckbox.checked : false;
+
+    if (!title || !start || selectedActivityTeachers.size === 0) {
+        alert("Udfyld titel, startdato og vælg mindst én lærer.");
+        return;
+    }
+
+    const wkndRate = type === "school_trip" ? r.tripHostHours : r.weekendHours;
+    const credits = [];
+    if (type === "absence") {
+        selectedActivityTeachers.forEach(tId => {
+            credits.push({ teacher: tId, tripWeekendHosts: 0, tripDayHosts: 0, eventHosts: 0, hours: 0 });
+        });
+    } else {
+        document.querySelectorAll("#act-credits-body tr").forEach(tr => {
+            const tId = tr.dataset.teacher;
+            const tripWeekendHosts = parseFloat(tr.querySelector(".cr-trip-wknd")?.value) || 0;
+            const tripDayHosts = parseFloat(tr.querySelector(".cr-trip-day")?.value) || 0;
+            const hours = tripWeekendHosts * wkndRate + tripDayHosts * r.weekdayHours;
+            credits.push({ teacher: tId, tripWeekendHosts, tripDayHosts, eventHosts: 0, hours });
+        });
+    }
+
+    const payload = {
+        id: editingActivityId || Date.now(),
+        type,
+        title,
+        start,
+        end: end < start ? start : end,
+        bufferDays,
+        calendarLocked: false,
+        noSchoolHosts,
+        credits
+    };
+
+    if (editingActivityId) {
+        const idx = state.activities.findIndex(a => a.id === editingActivityId);
+        if (idx !== -1) state.activities[idx] = { ...state.activities[idx], ...payload };
+    } else {
+        state.activities.push(payload);
+    }
+
+    reconcileActivityTripSlots(state);
+    cancelEditActivity();
+    saveState();
+}
+
+function editActivity(id) {
+    const act = state.activities.find(a => a.id === id);
+    if (!act) return;
+    editingActivityId = id;
+    document.getElementById("act-type").value = act.type;
+    document.getElementById("act-title").value = act.title;
+    document.getElementById("act-start").value = act.start;
+    document.getElementById("act-end").value = act.end;
+    document.getElementById("act-buffer").value = act.bufferDays;
+
+    const noSchoolCheckbox = document.getElementById("act-no-school");
+    if (noSchoolCheckbox) noSchoolCheckbox.checked = Boolean(act.noSchoolHosts);
+
+    selectedActivityTeachers = new Set((act.credits || []).map(c => c.teacher));
+    renderAll();
+    document.getElementById("tab-activities").scrollIntoView({ behavior: "smooth" });
+}
+
+function cancelEditActivity() {
+    editingActivityId = null;
+    document.getElementById("act-title").value = "";
+    document.getElementById("act-buffer").value = getEffectiveRules().defaultTripBufferDays;
+
+    const noSchoolCheckbox = document.getElementById("act-no-school");
+    if (noSchoolCheckbox) noSchoolCheckbox.checked = false;
+
+    selectedActivityTeachers.clear();
+    renderAll();
+}
+
+function lockTripInCalendar(id) {
+    const act = state.activities.find(a => a.id === id);
+    if (!act) return;
+
+    state = window.HostPlanner.distributeTripHosts(state, getEffectiveRules(), id);
+    const updatedAct = state.activities.find(a => a.id === id);
+    const participantIds = new Set((updatedAct?.credits || []).map(c => c.teacher));
+
+    state.shifts.forEach(s => {
+        if (s.date >= updatedAct.start && s.date <= updatedAct.end) {
+            s.assigned.forEach((tId, idx) => {
+                if (participantIds.has(tId)) {
+                    if (!Array.isArray(s.locked)) s.locked = Array(s.reqHosts).fill(false);
+                    s.locked[idx] = true;
+                }
+            });
+            (s.tripSlots || []).forEach(ts => {
+                if (ts.activityId === id || participantIds.has(ts.teacherId)) {
+                    ts.locked = true;
+                    ts.isAutoDraft = false;
+                }
+            });
+        }
+    });
+
+    updatedAct.calendarLocked = true;
+    saveState();
+}
+
+function unlockTripInCalendar(id) {
+    const act = state.activities.find(a => a.id === id);
+    if (!act) return;
+    const participantIds = new Set((act.credits || []).map(c => c.teacher));
+
+    state.shifts.forEach(s => {
+        if (s.date >= act.start && s.date <= act.end) {
+            if (Array.isArray(s.locked)) {
+                s.assigned.forEach((tId, idx) => {
+                    if (participantIds.has(tId)) s.locked[idx] = false;
+                });
+            }
+            (s.tripSlots || []).forEach(ts => {
+                if (ts.activityId === id || participantIds.has(ts.teacherId)) {
+                    ts.locked = false;
+                }
+            });
+        }
+    });
+
+    act.calendarLocked = false;
+    saveState();
+}
+
+function removeActivity(id) {
+    if (!confirm("Vil du slette denne registrering?")) return;
+    state.activities = state.activities.filter(a => a.id !== id);
+    state.shifts.forEach(s => {
+        if (Array.isArray(s.tripSlots)) {
+            s.tripSlots = s.tripSlots.filter(ts => ts.activityId !== id);
+        }
+    });
+    if (editingActivityId === id) cancelEditActivity();
+    saveState();
+}
+
+// --- CENTRAL REGLER & EKSPORT ---
+function saveCentralRules() {
+    const base = getEffectiveRules();
+    state.rules = {
+        ...base,
+        weekdayHours: parseFloat(document.getElementById("rule-weekday-hrs").value) || 0,
+        weekendHours: parseFloat(document.getElementById("rule-weekend-hrs").value) || 0,
+        tripHostHours: parseFloat(document.getElementById("rule-trip-hrs").value) || 0,
+        eventHostHours: parseFloat(document.getElementById("rule-event-hrs").value) || 0,
+        minRestDaysBetweenShifts: parseInt(document.getElementById("rule-rest-days").value, 10) || 0,
+        defaultTripBufferDays: parseInt(document.getElementById("rule-trip-buffer").value, 10) || 7
+    };
+    state.activities = normalizeActivities(state.activities, state.rules);
+    saveState();
+    alert("Timetakster og regler er opdateret.");
+}
+
+function applyActivitiesJson() {
+    try {
+        const parsed = JSON.parse(document.getElementById("activities-json-editor").value);
+        if (!Array.isArray(parsed)) throw new Error("Skal være en JSON-liste [...]");
+        state.activities = normalizeActivities(parsed, getEffectiveRules());
+        reconcileActivityTripSlots(state);
+        saveState();
+        alert("Skolerejser & arrangementer er opdateret!");
+    } catch (err) {
+        alert("Fejl i JSON: " + err.message);
+    }
+}
+
+function exportSettingsJsFile() {
+    const updatedSettings = JSON.parse(JSON.stringify(window.APP_SETTINGS));
+    const rules = getEffectiveRules();
+    updatedSettings.semesters[currentSemester].rules = rules;
+    updatedSettings.semesters[currentSemester].presetActivities = window.compactActivitiesForJson(state.activities, rules);
+
+    const fileContent = `window.APP_SETTINGS = ${JSON.stringify(updatedSettings, null, 4)};\n`;
+    const blob = new Blob([fileContent], { type: "application/javascript" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "settings.js";
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function exportJson() {
+    const rules = getEffectiveRules();
+    const exportPayload = window.buildExportPayload(state, rules);
+    const jsonString = JSON.stringify(exportPayload, null, 2);
+    const filename = getJsonFilename();
+    const shortPath = (SETTINGS.semesters[currentSemester].defaultJsonPath || filename).replace("./", "");
+
+    baseFileText = jsonString.trim();
+    hasLocalChanges = false;
+    persistWrapper();
+    setStatusBadge(`💾 Eksporteret (${filename})`, `Overskriv ${shortPath} i din projektmappe`);
+
+    const blob = new Blob([jsonString], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+}
+
+function handleJsonUpload(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+        try {
+            const loaded = JSON.parse(e.target.result);
+            if (loaded.rules) state.rules = loaded.rules;
+            if (loaded.activities) state.activities = normalizeActivities(loaded.activities, getEffectiveRules());
+            if (Array.isArray(loaded.acknowledgedFindings)) state.acknowledgedFindings = loaded.acknowledgedFindings;
+            if (loaded.lockedShifts || loaded.lockedTripSlots) {
+                state.shifts.forEach(s => {
+                    s.locked = Array(s.reqHosts).fill(false);
+                    s.tripSlots = [];
+                });
+                applyLockedShiftsOverlay(state.shifts, loaded.lockedShifts, loaded.lockedTripSlots, state.activities);
+            }
+            if ((!state.shifts || state.shifts.length === 0) && Array.isArray(loaded.shifts)) {
+                state.teachers = loaded.teachers || [];
+                state.shifts = loaded.shifts;
+            }
+            reconcileActivityTripSlots(state);
+            saveState(true);
+        } catch {
+            alert("Ugyldig JSON-fil.");
+        }
+    };
+    reader.readAsText(file, "UTF-8");
+    event.target.value = "";
+}
+
+function copyJsonToClipboard() {
+    navigator.clipboard.writeText(document.getElementById("json-preview").value)
+        .then(() => alert("JSON kopieret til udklipsholder!"));
+}
+
+function resetStorage() {
+    const shortPath = (SETTINGS.semesters[currentSemester].defaultJsonPath || "").replace("./", "");
+    if (confirm(`Vil du slette din lokale arbejdskopi i localStorage og genindlæse fra "${shortPath}" + regnearket?`)) {
+        localStorage.removeItem(getStorageKey(currentSemester));
+        initApp();
+    }
+}
+
+function populateMonthFilter() {
+    const months = [...new Set(state.shifts.map(s => s.date.slice(0, 7)))];
+    const el = document.getElementById("filter-month");
+    if (el) {
+        el.innerHTML = `<option value="all">Alle måneder</option>` +
+            months.map(m => `<option value="${m}">${m}</option>`).join("");
+    }
+}
+
+function switchTab(tabName) {
+    document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.tab === tabName));
+    document.querySelectorAll(".tab-content").forEach(s => s.classList.toggle("active", s.id === `tab-${tabName}`));
+}
+
+function jumpToShiftDate(dateStr) {
+    switchTab("schedule");
+    const monthFilter = document.getElementById("filter-month");
+    const statusFilter = document.getElementById("filter-status");
+    let needRerender = false;
+
+    if (monthFilter && monthFilter.value !== "all" && !dateStr.startsWith(monthFilter.value)) {
+        monthFilter.value = "all";
+        needRerender = true;
+    }
+    if (statusFilter && statusFilter.value !== "all") {
+        statusFilter.value = "all";
+        needRerender = true;
+    }
+    if (needRerender) renderAll();
+
+    const row = document.querySelector(`#schedule-body tr[data-date="${dateStr}"]`);
+    if (row) {
+        row.scrollIntoView({ behavior: "smooth", block: "center" });
+        row.classList.remove("row-flash");
+        void row.offsetWidth;
+        row.classList.add("row-flash");
+    }
+}
+
+window.addEventListener("DOMContentLoaded", initApp);
